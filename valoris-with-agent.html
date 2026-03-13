@@ -439,6 +439,14 @@ select.ds-picker:focus{border-color:var(--teal);}
 <!-- Sidebar backdrop -->
 <div id="demoBackdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:999;" onclick="toggleDemoSidebar()"></div>
 
+<!-- API Key Banner -->
+<div id="apiKeyBanner" style="width:100%;max-width:1240px;margin-bottom:12px;background:rgba(0,229,180,0.06);border:1px solid rgba(0,229,180,0.25);border-radius:10px;padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+  <span style="font-size:0.62rem;color:var(--teal);letter-spacing:0.08em;text-transform:uppercase;white-space:nowrap;">✦ API Key</span>
+  <input type="password" id="apiKeyInput" placeholder="Paste your Anthropic API key (sk-ant-...)" style="flex:1;min-width:240px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'DM Mono',monospace;font-size:0.67rem;padding:7px 10px;outline:none;" onfocus="this.style.borderColor='var(--teal)'" onblur="this.style.borderColor='var(--border)'" oninput="saveApiKey(this.value)"/>
+  <span id="apiKeyStatus" style="font-size:0.6rem;color:var(--muted);white-space:nowrap;"></span>
+  <span style="font-size:0.58rem;color:var(--muted);line-height:1.5;">Key stays in your browser only. Required for all AI features.</span>
+</div>
+
 <!-- HOME PAGE -->
 <div class="page active" id="page-home">
 
@@ -4957,7 +4965,7 @@ Write: (1) What the qualitative voice of employees most strongly signals about t
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': getApiKey(), 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 600,
@@ -5375,7 +5383,7 @@ Tone: consulting — structured, direct, evidence-led. No filler. No corporate j
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': getApiKey(), 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1000,
@@ -5391,6 +5399,41 @@ Tone: consulting — structured, direct, evidence-led. No filler. No corporate j
     document.getElementById('narrativeOutput').textContent='Error generating narrative. Please try again.';
   }
 }
+
+// ── API Key helpers ────────────────────────────────────────────────────────
+function saveApiKey(val) {
+  sessionStorage.setItem('valoris_api_key', val.trim());
+  const status = document.getElementById('apiKeyStatus');
+  if (val.trim().startsWith('sk-ant-')) {
+    status.textContent = '✓ Key saved for this session';
+    status.style.color = 'var(--teal)';
+  } else if (val.trim().length > 0) {
+    status.textContent = '⚠ Key should start with sk-ant-';
+    status.style.color = 'var(--gold)';
+  } else {
+    status.textContent = '';
+  }
+}
+
+function getApiKey() {
+  const key = sessionStorage.getItem('valoris_api_key') ||
+              document.getElementById('apiKeyInput')?.value?.trim() || '';
+  if (!key) {
+    alert('Please paste your Anthropic API key in the banner at the top of the page.');
+    document.getElementById('apiKeyInput')?.focus();
+  }
+  return key;
+}
+
+// Restore key input on load
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = sessionStorage.getItem('valoris_api_key');
+  if (saved) {
+    const inp = document.getElementById('apiKeyInput');
+    if (inp) { inp.value = saved; saveApiKey(saved); }
+  }
+});
+// ── END API Key helpers ────────────────────────────────────────────────────
 
 // ── ✦ REPORT AGENT ────────────────────────────────────────────────────────
 function agentSetGoal(text) {
@@ -5414,7 +5457,7 @@ function agentClear() {
 async function callClaudeAgent(prompt, maxTokens = 600) {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-api-key': getApiKey(), 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
       max_tokens: maxTokens,
@@ -5717,7 +5760,7 @@ Format each bullet as: "• LABEL: text" on its own line. Be direct, specific, a
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json','x-api-key':getApiKey(),'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:300,messages:[{role:'user',content:prompt}]})
     });
     const data = await res.json();
