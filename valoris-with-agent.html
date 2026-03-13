@@ -5482,91 +5482,71 @@ async function runReportAgent() {
   const idx = parseInt(document.getElementById('outDatasetPicker').value) || 0;
   const ds = datasets[idx];
   if (!ds) { alert('Please select a dataset first.'); return; }
-
   const goal = document.getElementById('agentGoalInput').value.trim();
   if (!goal) { alert('Please describe what you need.'); return; }
 
   const btn = document.getElementById('agentRunBtn');
   btn.disabled = true;
-  btn.textContent = '⟳ Working...';
+  btn.textContent = 'Working...';
   agentClear();
 
-  // Build shared data context once (reused in all section calls)
-  const baseAlt = p => p.alternatives.find(a => a.costDelta === 0) || p.alternatives[0];
-  const selAlt  = p => getSelAlt(p);
-  let totalCost = 0, totalVd = 0, totalMd = 0;
-  const programSummaries = ds.programs.map(p => {
-    const base = baseAlt(p), sel = selAlt(p);
-    const vd = sel.value - p.value, md = sel.market - p.market;
-    totalCost += sel.costDelta; totalVd += vd; totalMd += md;
-    const bm = ds.benchmark?.find(b => b.name === p.name);
-    return `${p.name}: Current="${base.name}" → Proposed="${sel.name}" | Cost Δ: ${fmtDelta(sel.costDelta)} | Value Δ: ${vd > 0 ? '+' : ''}${vd.toFixed(1)} | Market Δ: ${md > 0 ? '+' : ''}${md.toFixed(1)}${bm ? ` | vs Benchmark: Value ${(p.value - bm.value) > 0 ? '+' : ''}${(p.value - bm.value).toFixed(0)}, Market ${(p.market - bm.market) > 0 ? '+' : ''}${(p.market - bm.market).toFixed(0)}` : ''}`;
-  }).join('\n');
-
-  const roiRows = [];
-  ds.programs.forEach(p => {
-    const base = baseAlt(p);
-    p.alternatives.forEach(a => {
-      if (a.costDelta <= 0) return;
-      const vd = a.value - base.value;
-      roiRows.push({ prog: p.name, alt: a.name, roi: vd / a.costDelta * 100000, cost: a.costDelta });
-    });
-  });
-  roiRows.sort((a, b) => b.roi - a.roi);
-  const topROI = roiRows.slice(0, 3).map(r => `${r.prog} → ${r.alt} (ROI: ${r.roi.toFixed(1)} value pts per $100K)`).join('\n');
-
-  const dataContext = `CLIENT: ${ds.clientName} (${ds.year}) | Industry: ${ds.industry}
-PROGRAMS:\n${programSummaries}
-PORTFOLIO TOTALS: Investment: ${fmtDelta(totalCost)} | Avg Value Δ: ${totalVd > 0 ? '+' : ''}${(totalVd / ds.programs.length).toFixed(1)} | Avg Market Δ: ${totalMd > 0 ? '+' : ''}${(totalMd / ds.programs.length).toFixed(1)}
-TOP ROI OPPORTUNITIES:\n${topROI || 'None identified'}`;
-
   try {
-    // ── STEP 1: Agent decides what to write ──────────────────────────────
+    // Build data summary
+    const baseAlt = function(p) { return p.alternatives.find(function(a){return a.costDelta===0;}) || p.alternatives[0]; };
+    let totalCost = 0, totalVd = 0, totalMd = 0;
+    const progLines = ds.programs.map(function(p) {
+      const base = baseAlt(p), sel = getSelAlt(p);
+      const vd = sel.value - p.value, md = sel.market - p.market;
+      totalCost += sel.costDelta; totalVd += vd; totalMd += md;
+      const bm = ds.benchmark && ds.benchmark.find(function(b){return b.name===p.name;});
+      let line = p.name + ': current=' + base.name + ' proposed=' + sel.name;
+      line += ' cost=' + fmtDelta(sel.costDelta);
+      line += ' valueChange=' + (vd>0?'+':'') + vd.toFixed(1);
+      line += ' marketChange=' + (md>0?'+':'') + md.toFixed(1);
+      if (bm) line += ' vsBenchmarkValue=' + (p.value-bm.value>0?'+':'') + (p.value-bm.value).toFixed(0);
+      return line;
+    });
+
+    const roiRows = [];
+    ds.programs.forEach(function(p) {
+      const base = baseAlt(p);
+      p.alternatives.forEach(function(a) {
+        if (a.costDelta <= 0) return;
+        const vd = a.value - base.value;
+        roiRows.push(p.name + ' to ' + a.name + ' ROI=' + (vd/a.costDelta*100000).toFixed(1) + ' cost=' + fmtDelta(a.costDelta));
+      });
+    });
+    roiRows.sort(function(a,b){ return parseFloat(b.split('ROI=')[1]) - parseFloat(a.split('ROI=')[1]); });
+
+    const ctx = 'CLIENT: ' + ds.clientName + ' (' + ds.year + ') Industry: ' + ds.industry + '\n'
+      + 'PROGRAMS:\n' + progLines.join('\n') + '\n'
+      + 'TOTALS: investment=' + fmtDelta(totalCost)
+      + ' avgValueChange=' + (totalVd>0?'+':'') + (totalVd/ds.programs.length).toFixed(1)
+      + ' avgMarketChange=' + (totalMd>0?'+':'') + (totalMd/ds.programs.length).toFixed(1) + '\n'
+      + 'TOP ROI:\n' + (roiRows.slice(0,3).join('\n') || 'none');
+
+    // STEP 1: Plan
     agentLog('Reading your request...');
-    const planRaw = await callClaudeAgent(
-      `You are a total rewards consulting AI agent. A user has given you this goal:
-"${goal}"
+    const planPrompt = 'You are a total rewards AI agent. Goal: "' + goal + '"\n\n'
+      + 'Client data:\n' + ctx + '\n\n'
+      + 'Choose which sections to write and the tone.\n'
+      + 'Sections available: executive_summary, current_state, scenario_rationale, roi_case, recommendations, risk_flags\n'
+      + 'Return ONLY valid JSON, no explanation: {"sections":["id","id"],"tone":"board|chro|consultant","focus_note":"one sentence"}';
 
-You have access to this client data:
-${dataContext}
-
-Decide which of the following report sections to include, and in what order. Also choose the appropriate tone.
-
-Available sections:
-- executive_summary: 3-4 sentence headline finding + recommendation
-- current_state: where they are strong/weak vs market
-- scenario_rationale: why the proposed changes make sense  
-- roi_case: the financial case — cost, value gained, best ROI programs
-- recommendations: 3-4 specific action items
-- risk_flags: programs with poor ROI or market gaps worth flagging
-
-Return ONLY valid JSON in this exact format (no explanation, no markdown):
-{"sections":["section_id","section_id"],"tone":"board|chro|consultant","focus_note":"one sentence on what to emphasise"}`,
-      400
-    );
+    const planRaw = await callClaudeAgent(planPrompt, 300);
+    agentLog('Raw plan: ' + planRaw.substring(0, 120));
 
     let plan;
     try {
-      const cleaned = planRaw.replace(/```json|```/g, '').trim();
-      plan = JSON.parse(cleaned);
+      plan = JSON.parse(planRaw.replace(/```json|```/g, '').trim());
     } catch(e) {
-      // Fallback plan if JSON parse fails
-      plan = { sections: ['executive_summary','current_state','scenario_rationale','roi_case','recommendations'], tone: 'chro', focus_note: '' };
+      plan = { sections: ['executive_summary','current_state','roi_case','recommendations'], tone: 'chro', focus_note: '' };
+      agentLog('Using default plan (JSON parse failed)');
     }
+    agentLog('Plan: ' + plan.sections.length + ' sections, tone: ' + plan.tone);
 
-    agentLog(`Plan: ${plan.sections.length} sections · tone: ${plan.tone}${plan.focus_note ? ' · ' + plan.focus_note : ''}`);
-
-    // ── STEP 2: Write each section ───────────────────────────────────────
-    const sectionDefs = {
-      executive_summary: `Write a punchy 3-4 sentence executive summary. Open with the single most important finding. End with the recommendation and investment required. No header needed — this IS the header.`,
-      current_state: `Write 2 paragraphs on current state assessment. Where is this client strong vs market? Where are the gaps? What is the competitive risk if they don't act?`,
-      scenario_rationale: `Write 2 paragraphs on the proposed design rationale. What are the priority changes and why? How do they connect to talent outcomes?`,
-      roi_case: `Write 2 paragraphs on the ROI case. Total investment, value gained, which programs deliver the most per dollar. Be specific with numbers.`,
-      recommendations: `Write a clear recommendation paragraph followed by 3-4 specific, numbered action items. Make them concrete — who does what by when.`,
-      risk_flags: `Write 1 paragraph flagging programs with poor ROI or material gaps vs benchmark. Be direct about what needs attention.`
-    };
-
-    const sectionTitles = {
+    // STEP 2: Write sections
+    const titles = {
       executive_summary: 'EXECUTIVE SUMMARY',
       current_state: 'CURRENT STATE',
       scenario_rationale: 'PROPOSED DESIGN RATIONALE',
@@ -5574,58 +5554,65 @@ Return ONLY valid JSON in this exact format (no explanation, no markdown):
       recommendations: 'RECOMMENDATION & NEXT STEPS',
       risk_flags: 'RISK FLAGS'
     };
+    const instructions = {
+      executive_summary: 'Write 3-4 sentences: the single biggest finding, what should change, and the investment required.',
+      current_state: 'Write 2 paragraphs: where this client is strong vs market, where the gaps are, and the competitive risk.',
+      scenario_rationale: 'Write 2 paragraphs: why the proposed changes make sense and how they connect to talent outcomes.',
+      roi_case: 'Write 2 paragraphs: total investment, value gained, which programs give the most per dollar. Use the actual numbers.',
+      recommendations: 'Write one paragraph recommendation then 3-4 numbered action items. Be specific.',
+      risk_flags: 'Write 1 paragraph flagging programs with poor ROI or gaps vs benchmark.'
+    };
+    const toneNote = plan.tone === 'board' ? 'Board-level: brief, strategic, no jargon.'
+      : plan.tone === 'chro' ? 'CHRO-level: structured, direct, evidence-led.'
+      : 'Consultant: precise, analytical, commercially sharp.';
 
     const writtenSections = [];
-    for (const sectionId of plan.sections) {
-      agentLog(`Writing: ${sectionTitles[sectionId] || sectionId}...`);
-      const instruction = sectionDefs[sectionId] || `Write a concise section about ${sectionId}.`;
-      const sectionText = await callClaudeAgent(
-        `You are a senior total rewards consultant. Write one section of a consulting report.
+    for (let i = 0; i < plan.sections.length; i++) {
+      const sid = plan.sections[i];
+      const title = titles[sid] || sid.toUpperCase();
+      agentLog('Writing: ' + title + '...');
 
-${instruction}
+      const secPrompt = 'You are a senior total rewards consultant writing one section of a report.\n\n'
+        + 'Section: ' + title + '\n'
+        + 'Task: ' + (instructions[sid] || 'Write a concise section.') + '\n'
+        + 'Tone: ' + toneNote + '\n'
+        + (plan.focus_note ? 'Focus: ' + plan.focus_note + '\n' : '')
+        + '\nClient data:\n' + ctx + '\n\n'
+        + 'Write ONLY the section body. Plain text. No headers. No markdown. No extra commentary.';
 
-Tone: ${plan.tone === 'board' ? 'Board-level — brief, strategic, no HR jargon' : plan.tone === 'chro' ? 'CHRO — structured, direct, evidence-led' : 'Consultant — precise, analytical, commercially sharp'}
-${plan.focus_note ? `Focus emphasis: ${plan.focus_note}` : ''}
-
-Client data:
-${dataContext}
-
-Write ONLY the section body — no extra commentary. Plain text, no markdown.`,
-        500
-      );
-      const bodyText = sectionText.trim();
-      agentLog(`  ✓ ${sectionTitles[sectionId]} (${bodyText.length} chars)`);
-      writtenSections.push({ id: sectionId, title: sectionTitles[sectionId] || sectionId.toUpperCase(), body: bodyText });
+      const body = await callClaudeAgent(secPrompt, 600);
+      const bodyTrimmed = body.trim();
+      agentLog('  done: ' + bodyTrimmed.length + ' chars');
+      writtenSections.push({ title: title, body: bodyTrimmed });
     }
 
-    // ── STEP 3: Assemble into final memo ─────────────────────────────────
-    agentLog('Assembling final memo...');
-    const divider = '\n\n' + '─'.repeat(45) + '\n\n';
-    const assembled = writtenSections.map(s => {
-      const body = s.body || '[Section content unavailable]';
-      return s.title + '\n\n' + body;
-    }).join(divider);
-    const header = ds.clientName + ' — Total Rewards Strategy\n' + ds.year + ' | ' + ds.industry + '\nGenerated by Valoris Report Agent\n\n' + '═'.repeat(50) + '\n\n';
-    const fullText = header + assembled;
+    // STEP 3: Assemble
+    agentLog('Assembling...');
+    let output = ds.clientName + ' - Total Rewards Strategy\n';
+    output += ds.year + ' | ' + ds.industry + '\n';
+    output += 'Generated by Valoris Report Agent\n\n';
+    output += '='.repeat(50) + '\n\n';
+    for (let i = 0; i < writtenSections.length; i++) {
+      if (i > 0) output += '\n\n' + '-'.repeat(45) + '\n\n';
+      output += writtenSections[i].title + '\n\n';
+      output += writtenSections[i].body;
+    }
 
-    // ── STEP 4: Display ──────────────────────────────────────────────────────
-    agentLog('Done — ' + plan.sections.length + ' sections assembled ✓');
-    const outputEl = document.getElementById('narrativeOutput');
-    outputEl.textContent = fullText;
+    // STEP 4: Display
+    agentLog('Done - ' + plan.sections.length + ' sections assembled');
+    const outEl = document.getElementById('narrativeOutput');
+    outEl.textContent = output;
     document.getElementById('narrativeCard').style.display = 'block';
     document.getElementById('narrativeLoading').style.display = 'none';
-
-    // Scroll to result
     document.getElementById('narrativeCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   } catch(err) {
-    agentLog(`Error: ${err.message}. Please check your connection and try again.`);
+    agentLog('Error: ' + err.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Run Agent ✦';
+    btn.textContent = 'Run Agent \u2736';
   }
 }
-// ── END REPORT AGENT ───────────────────────────────────────────────────────
 
 function copyNarrative() {
   const text = document.getElementById('narrativeOutput').textContent;
